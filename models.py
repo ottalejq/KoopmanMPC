@@ -317,7 +317,7 @@ class LearnedRFFMPC(BaseMPC):
             opt.step()
             scheduler.step()
 
-            if epoch % 10 == 0:
+            if epoch % 10 == 0 or epoch % (self.epochs - 1) == 0:
                 print(
                     f"epoch {epoch} | "
                     f"loss {loss.item():.6e} | "
@@ -508,7 +508,7 @@ class DeepRFFMPC(BaseMPC):
             opt.step()
             scheduler.step()
 
-            if epoch % 10 == 0:
+            if epoch % 10 == 0 or epoch % (self.epochs - 1) == 0:
                 print(
                     f"epoch {epoch} | "
                     f"loss {loss.item():.6e} | "
