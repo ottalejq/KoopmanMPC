@@ -565,7 +565,7 @@ class CartPole:
         mass = ax.add_patch(plt.Circle((0, 0), 0.08, facecolor="white", edgecolor="black", lw=2, zorder=4))
         txt = ax.text(0.02, 0.92, "", transform=ax.transAxes, color="black")
 
-        force_ax = ax.inset_axes([0.62, 0.72, 0.34, 0.22])
+        force_ax = ax.inset_axes([0.62, 0.67, 0.34, 0.22])
         force_ax.set_title("u(t)", fontsize=9, color="black")
         force_ax.axhline(0, color="black", lw=1)
 
