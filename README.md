@@ -29,3 +29,66 @@ KoopmanMPC/
 ├── system.py        # Cart-Pole system and simulation
 ├── utils.py         # State encoding
 └── requirements.txt # Python dependencies
+```
+
+## Installation
+
+The project requires Python and [acados](https://github.com/acados/acados). Linux or WSL with Ubuntu is recommended.
+
+### 1. Install acados
+
+Install the required system packages:
+
+```bash
+sudo apt update
+sudo apt install git cmake build-essential python3-pip python3-venv
+```
+
+Clone and build acados:
+
+```bash
+cd ~
+git clone https://github.com/acados/acados.git
+cd acados
+git submodule update --recursive --init
+
+mkdir -p build
+cd build
+cmake -DACADOS_WITH_QPOASES=ON ..
+make install -j4
+```
+
+### 2. Clone this repository
+
+```bash
+cd ~
+git clone https://github.com/ottalejq/KoopmanMPC.git
+cd KoopmanMPC
+```
+
+### 3. Create the Python environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install -e ~/acados/interfaces/acados_template
+```
+
+### 4. Configure acados
+
+Set the acados installation path:
+
+```bash
+export ACADOS_SOURCE_DIR=$HOME/acados
+```
+
+This command must be run in each new terminal before running the project. To set it permanently, add it to `~/.bashrc`.
+
+### 5. Run
+
+Run the main simulation:
+
+```bash
+python main.py
+```
