@@ -1,11 +1,39 @@
 import numpy as np
 import casadi as ca
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.patches import FancyBboxPatch
 from scipy.linalg import expm, solve_discrete_are
+import time
+from acados_template import AcadosOcp, AcadosOcpSolver, AcadosModel
+import scipy
 
 
+
+# Plot styling
+mpl.rcParams.update({
+    "font.family": "serif",
+    "mathtext.fontset": "cm",
+    "axes.unicode_minus": False,
+
+    "font.size": 12,
+    "axes.labelsize": 12,
+    "axes.titlesize": 12,
+    "xtick.labelsize": 12,
+    "ytick.labelsize": 12,
+    "legend.fontsize": 12,
+
+    "figure.dpi": 150,
+    "savefig.dpi": 300,
+
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+})
+
+
+
+# Cart-pole dynamics, simulation, sampling, and MPC utilities
 class CartPole:
     def __init__(
         self,
@@ -15,7 +43,8 @@ class CartPole:
         M=1.0,
         m=1.0,
         l=1.0,
-        g=9.81
+        g=9.81,
+        seed=None
     ):
         self.T = T
         self.dt = dt
@@ -31,7 +60,10 @@ class CartPole:
         self.l = l
         self.g = g
 
+        self.rng = np.random.default_rng(seed)
 
+
+    # Compute the discrete-time terminal LQR cost.
     def Pt(self, Q, R):
         A_c = np.array([
             [0, 1, 0, 0],
@@ -66,6 +98,7 @@ class CartPole:
 
         return P
 
+    # Evaluate continuous-time cart-pole dynamics.
     def dynamics(self, z, u, xp=np):
         if xp is np:
             z = np.asarray(z)
@@ -97,6 +130,7 @@ class CartPole:
 
         return xp.vertcat(xd, xdd, thd, thdd)
 
+    # Integrate one time step with RK4.
     def step(self, z, u):
         one = z.ndim == 1
         z = z[None].copy() if one else z.copy()
@@ -113,6 +147,7 @@ class CartPole:
 
         return z[0] if one else z
 
+    # CasADi-compatible RK4 integration.
     def step_casadi(self, z, u):
         h = self.dt / self.n_substeps
         zn = z
@@ -127,7 +162,22 @@ class CartPole:
 
         return zn
 
+    # Generate random state-control trajectories.
+    def generate_random_sequences(self, K, H, x_low, x_high, u_low, u_high):
+        x = self.rng.uniform(x_low, x_high, size=(K, 4))
+        U = self.rng.uniform(u_low, u_high, size=(K, H, 1))
 
+        X = np.empty((K, H, 4))
+        Xn = np.empty((K, H, 4))
+
+        for t in range(H):
+            X[:, t] = x
+            x = self.step(x, U[:, t])
+            Xn[:, t] = x
+
+        return X, Xn, U
+
+    # Solve for a constrained reference trajectory and feedback gains.
     def generate_reference(self, Q, R, x_max, u_max):
         print('Generating reference trajectory.')
 
@@ -222,24 +272,28 @@ class CartPole:
         return self
 
 
+    # Sample training data around the reference trajectory.
     def sample_reference(
         self,
         sigma_X,
         sigma_U,
-        n_samples_per_step,
+        n_samples,
+        H
     ):
         print('Generating training samples.')
 
         X, Xn, U = [], [], []
 
+        n_samples_per_step = n_samples // self.N
+
         for x_ref, u_ref, K in zip(self.X_ref, self.U_ref, self.K):
-            dx = np.random.multivariate_normal(
+            dx = self.rng.multivariate_normal(
                 mean=np.zeros(x_ref.shape),
                 cov=sigma_X**2,
                 size=n_samples_per_step,
             )
 
-            du = np.random.normal(
+            du = self.rng.normal(
                 loc=0.0,
                 scale=sigma_U,
                 size=n_samples_per_step,
@@ -247,7 +301,10 @@ class CartPole:
 
             x = x_ref + dx
             u = u_ref - dx @ K.reshape(-1) + du
-            xn = self.step(x, u)
+
+            xn = x.copy()
+            for _ in range(H):
+                xn = self.step(xn, u)
 
             X.append(x)
             Xn.append(xn)
@@ -259,32 +316,71 @@ class CartPole:
             np.concatenate(U),
         )
 
+
+    # Sample random states and constant-input rollouts.
+    def sample_random(
+        self,
+        n_samples,
+        H,
+        x_low=None,
+        x_high=None,
+        u_low=-20.0,
+        u_high=20.0,
+    ):
+
+        print("Generating random training samples.")
+
+        if x_low is None:
+            x_low = np.array([-2.0, -5.0, -np.pi, -5.0])
+
+        if x_high is None:
+            x_high = np.array([2.0, 5.0, np.pi, 5.0])
+
+        X = self.rng.uniform(
+            low=x_low,
+            high=x_high,
+            size=(n_samples, len(x_low)),
+        )
+
+        U = self.rng.uniform(
+            low=u_low,
+            high=u_high,
+            size=(n_samples, 1),
+        )
+
+        Xn = X.copy()
+        for _ in range(H):
+            Xn = self.step(Xn, U)
+
+        return X, Xn, U
+
+    # Pre-generate process noise for simulation.
     def generate_process_noise(self, sigma_X):
-        self.process_noise = np.random.multivariate_normal(
+        self.process_noise = self.rng.multivariate_normal(
             mean=np.zeros(4),
             cov=sigma_X**2,
-            size=self.N,
+            size=self.N
         )
         return self
 
-    def simulate(self, policy, H, animate=True):
+    # Simulate the closed-loop system.
+    def simulate(self, control, animate=True):
         x = self.X0
 
-        X = np.zeros((self.N - H, 4))
-        Xn = np.zeros((self.N - H, 4))
-        U = np.zeros((self.N - H, 1))
+        X = np.zeros((self.N, 4))
+        Xn = np.zeros((self.N, 4))
+        U = np.zeros((self.N, 1))
 
-        for k in range(self.N - H):
-            print(
-                f"\rSimulating | {(k + 1) / (self.N - H):.2f}",
-                end="",
-                flush=True,
-            )
+        control_time = 0.0
 
-            X_ref = self.X_ref[k: k + H]
-            U_ref = self.U_ref[k: k + H]
+        for k in range(self.N):   
+            t0 = time.perf_counter()
 
-            u = policy(x, X_ref, U_ref)
+            u = control(x)
+
+            control_time += time.perf_counter() - t0
+
+            u = float(np.asarray(u).squeeze())
 
             xn = self.step(x, u)
 
@@ -296,14 +392,160 @@ class CartPole:
 
             x = xn
 
-        print('')
+        print()
+        print(f"Mean MPC control time: {1e3 * control_time / self.N:.3f} ms")
 
         if animate:
             self.ani = self.animate(X, U)
 
         return X, Xn, U
 
+    # Evaluate closed-loop performance metrics.
+    def evaluate(self, control, Q, R, Qt, animate=True, tol=0.05, angle_tol=np.deg2rad(10), rate_tol=0.5):
+        X, Xn, U = self.simulate(control, animate)
 
+        E = X - self.Xf
+        state_cost = np.sum(np.einsum("ni,ij,nj->n", E, Q, E))
+        input_cost = np.sum(np.einsum("ni,ij,nj->n", U, R, U))
+
+        terminal_error = Xn[-1] - self.Xf
+        terminal_cost = terminal_error @ Qt @ terminal_error
+        total_cost = state_cost + input_cost + terminal_cost
+
+        rmse = np.sqrt(np.mean(E**2, axis=0))
+        error_norm = np.linalg.norm(Xn - self.Xf, axis=1)
+
+        suffix = np.minimum.accumulate((error_norm < tol)[::-1])[::-1]
+
+        settling_time = (
+            self.dt * np.argmax(suffix)
+            if np.any(suffix)
+            else np.nan
+        )
+
+        theta_error = np.arctan2(
+            np.sin(Xn[-1, 2] - self.Xf[2]),
+            np.cos(Xn[-1, 2] - self.Xf[2]),
+        )
+
+        success = (
+            abs(theta_error) < angle_tol
+            and abs(Xn[-1, 3] - self.Xf[3]) < rate_tol
+        )
+
+        metrics = {
+            "success": float(success),
+            "total_cost": float(total_cost),
+            "state_cost": float(state_cost),
+            "input_cost": float(input_cost),
+            "terminal_cost": float(terminal_cost),
+            "final_error": float(np.linalg.norm(terminal_error)),
+            "rmse_x": float(rmse[0]),
+            "rmse_xdot": float(rmse[1]),
+            "rmse_theta": float(rmse[2]),
+            "rmse_thetadot": float(rmse[3]),
+            "control_effort": float(np.sum(U[:, 0] ** 2)),
+            "control_variation": float(np.sum(np.diff(U[:, 0]) ** 2)),
+            "max_control": float(np.max(np.abs(U[:, 0]))),
+            "settling_time": float(settling_time),
+        }
+
+        for metric, value in metrics.items():
+            print(f'{metric}: {value}')
+
+        return metrics
+
+    # Initialize the acados nonlinear MPC solver.
+    def init_physical_mpc(self, Q, R, Qt, N, u_min=-20.0, u_max=20.0, x_ref=None):
+        nx, nu = 4, 1
+        Q = np.asarray(Q, dtype=float)
+        R = np.atleast_2d(np.asarray(R, dtype=float))
+        Qt = np.asarray(Qt, dtype=float)
+        x_ref = self.Xf if x_ref is None else np.asarray(x_ref, dtype=float).reshape(nx)
+
+        x, u = ca.MX.sym("x", nx), ca.MX.sym("u", nu)
+
+        model = AcadosModel()
+        model.name = "true_control"
+        model.x, model.u = x, u
+        model.disc_dyn_expr = self.step_casadi(x, u)
+
+        ocp = AcadosOcp()
+        ocp.model = model
+
+        ocp.cost.cost_type = ocp.cost.cost_type_e = "LINEAR_LS"
+        ocp.cost.Vx = np.r_[np.eye(nx), np.zeros((nu, nx))]
+        ocp.cost.Vu = np.r_[np.zeros((nx, nu)), np.eye(nu)]
+        ocp.cost.W = scipy.linalg.block_diag(Q, R)
+        ocp.cost.yref = np.r_[x_ref, np.zeros(nu)]
+        ocp.cost.Vx_e = np.eye(nx)
+        ocp.cost.W_e = Qt
+        ocp.cost.yref_e = x_ref
+
+        ocp.constraints.x0 = np.zeros(nx)
+        ocp.constraints.idxbu = np.array([0])
+        ocp.constraints.lbu = np.array([u_min])
+        ocp.constraints.ubu = np.array([u_max])
+
+        opt = ocp.solver_options
+        opt.N_horizon = N
+        opt.tf = N * self.dt
+        opt.integrator_type = "DISCRETE"
+        opt.nlp_solver_type = "SQP_RTI"
+        opt.qp_solver = "PARTIAL_CONDENSING_HPIPM"
+        opt.hessian_approx = "GAUSS_NEWTON"
+        opt.print_level = 0
+
+        self.physical_mpc_solver = AcadosOcpSolver(ocp, json_file="true_control.json", verbose=False)
+        self.physical_mpc_N = N
+        self.physical_mpc_x_ref = x_ref
+        self.physical_mpc_u_min = u_min
+        self.physical_mpc_u_max = u_max
+        self.physical_mpc_U = np.zeros((N, nu))
+        self.physical_mpc_X = None
+
+
+    # Solve one MPC step using warm-started trajectories.
+    def physical_mpc(self, x, return_state=False):
+        nx, N = 4, self.physical_mpc_N
+        s = self.physical_mpc_solver
+
+        x = np.asarray(x, dtype=float)
+
+        s.set(0, "lbx", x)
+        s.set(0, "ubx", x)
+
+        U = np.clip(
+            np.r_[self.physical_mpc_U[1:], self.physical_mpc_U[-1:]],
+            self.physical_mpc_u_min,
+            self.physical_mpc_u_max,
+        )
+
+        if self.physical_mpc_X is None:
+            X = np.zeros((N + 1, nx))
+            X[0] = x
+            for k in range(N):
+                X[k + 1] = self.step(X[k], U[k])
+        else:
+            X = np.r_[self.physical_mpc_X[1:], self.physical_mpc_X[-1:]]
+            X[0] = x
+
+        for k in range(N):
+            s.set(k, "x", X[k])
+            s.set(k, "u", U[k])
+
+        s.set(N, "x", X[N])
+
+        s.solve()
+
+        self.physical_mpc_U = np.array([s.get(k, "u") for k in range(N)])
+        self.physical_mpc_X = np.array([s.get(k, "x") for k in range(N + 1)])
+
+        return (self.physical_mpc_U, self.physical_mpc_X) if return_state else self.physical_mpc_U[0]
+
+
+
+    # Animate the cart-pole trajectory and applied force.
     def animate(self, X=None, U=None):
         cw, ch, wr = 0.4, 0.2, 0.05
         view = 2.5
@@ -399,5 +641,5 @@ class CartPole:
             cache_frame_data=False,
         )
 
-        plt.show()
+        plt.show(block=True)
         return ani

@@ -2,6 +2,13 @@
 __pycache__/
 *.py[codz]
 *$py.class
+acados_venv/
+.venv/
+
+# acados
+.acados_jobs/
+c_generated_code/
+*.json
 
 # C extensions
 *.so
