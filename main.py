@@ -23,9 +23,9 @@ if __name__ == '__main__':
     system.generate_process_noise(sigma_X=np.diag(sigma_X_simulate) * 0)
 
     # Optional real system nmpc 
-    system.init_physical_mpc(Q=Q, R=R, Qt=Q*100, N=200)
-    pyhsical_mpc = system.physical_mpc
-    system.evaluate(control=pyhsical_mpc, Q=Q, R=R, Qt=Q*100)
+    # system.init_physical_mpc(Q=Q, R=R, Qt=Q*100, N=200)
+    # pyhsical_mpc = system.physical_mpc
+    # system.evaluate(control=pyhsical_mpc, Q=Q, R=R, Qt=Q*100)
 
     # Generate the optimal reference trajectory
     system.generate_reference(
