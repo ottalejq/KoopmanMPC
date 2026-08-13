@@ -147,8 +147,9 @@ def run_experiment(seed):
 
 
 if __name__ == "__main__":
-    os.environ["ACADOS_SOURCE_DIR"] = "/home/lennart/acados"
-
+    if "ACADOS_SOURCE_DIR" not in os.environ:
+        raise RuntimeError("ACADOS_SOURCE_DIR is not set.")
+    
     seeds = range(30)
 
     # Run independent experiments in parallel.
